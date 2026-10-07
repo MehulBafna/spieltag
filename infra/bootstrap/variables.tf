@@ -20,6 +20,23 @@ variable "github_repo" {
   type        = string
 }
 
+variable "github_owner_id" {
+  description = "Numeric GitHub ID of the owner. Needed for repositories created after 15 July 2026, whose sign-in tokens carry it. Find it with: gh api users/<owner> --jq .id"
+  type        = string
+  default     = ""
+}
+
+variable "github_repo_id" {
+  description = "Numeric GitHub ID of the repository. Find it with: gh api repos/<owner>/<repo> --jq .id"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = (var.github_repo_id == "") == (var.github_owner_id == "")
+    error_message = "Set both github_owner_id and github_repo_id, or neither."
+  }
+}
+
 variable "alert_email" {
   description = "Email address that receives the budget alerts."
   type        = string

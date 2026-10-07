@@ -1,3 +1,9 @@
 github_owner = "your-github-username"
 github_repo  = "spieltag"
 alert_email  = "you@example.com"
+
+# Repositories created after 15 July 2026 need the numeric IDs too:
+#   gh api users/your-github-username --jq .id
+#   gh api repos/your-github-username/spieltag --jq .id
+# github_owner_id = "123456"
+# github_repo_id  = "456789"

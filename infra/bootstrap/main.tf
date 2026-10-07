@@ -6,8 +6,18 @@ data "aws_caller_identity" "current" {}
 
 locals {
   account_id   = data.aws_caller_identity.current.account_id
-  repo         = "${var.github_owner}/${var.github_repo}"
   state_bucket = "${var.project}-tfstate-${local.account_id}"
+
+  # GitHub repositories created after 15 July 2026 sign their tokens with the numeric owner and
+  # repository IDs in the subject, e.g. repo:octocat@123/my-repo@456:ref:refs/heads/main. The IDs
+  # cannot be reused after a rename or a deleted-and-recreated repository, so the trust is bound
+  # to this exact repository. Older repositories use the plain names unless they opted in.
+  use_ids = var.github_owner_id != "" && var.github_repo_id != ""
+  repo = (
+    local.use_ids
+    ? "${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
+    : "${var.github_owner}/${var.github_repo}"
+  )
 }
 
 # ---------------------------------------------------------------------------

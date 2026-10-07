@@ -174,7 +174,7 @@ and check `aws sts get-caller-identity` before you start.
 ```bash
 # 1. Bootstrap, once, with local state: state bucket, GitHub OIDC roles, budget alert
 cd infra/bootstrap
-cp terraform.tfvars.example terraform.tfvars    # set github_owner, github_repo, alert_email
+cp terraform.tfvars.example terraform.tfvars    # set github_owner, github_repo, alert_email and, for repos created after 15 July 2026, github_owner_id and github_repo_id
 terraform init && terraform apply
 cd ../..
 
