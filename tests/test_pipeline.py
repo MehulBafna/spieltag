@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from spieltag.contracts import ContractError
-from spieltag.pipeline import read_curated, run_ingest, snapshot_id
+from spieltag.pipeline import load_matches, read_curated, run_ingest, snapshot_id
 from spieltag.store import LocalStore, S3Store
 
 NOW = datetime(2025, 8, 31, 6, 0, 0, tzinfo=UTC)
@@ -55,6 +55,10 @@ def test_local_store_round_trip(tmp_path):
     assert store.get_bytes("a/b.txt") == b"hello"
 
 
+class NoSuchKey(Exception):  # looks like the error boto3 raises
+    response = {"Error": {"Code": "NoSuchKey"}}
+
+
 class FakeS3Client:
     def __init__(self):
         self.objects = {}
@@ -63,6 +67,8 @@ class FakeS3Client:
         self.objects[(Bucket, Key)] = Body
 
     def get_object(self, *, Bucket, Key):  # noqa: N803
+        if (Bucket, Key) not in self.objects:
+            raise NoSuchKey(Key)
         body = self.objects[(Bucket, Key)]
         return {"Body": type("Body", (), {"read": lambda self: body})()}
 
@@ -74,3 +80,33 @@ def test_s3_store_writes_to_the_given_bucket_and_returns_a_uri():
     assert uri == "s3://my-lake/raw/x.json"
     assert client.objects[("my-lake", "raw/x.json")] == b"{}"
     assert store.get_bytes("raw/x.json") == b"{}"
+
+
+def test_a_missing_object_is_a_file_not_found_error_for_both_stores(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        LocalStore(tmp_path).get_bytes("nothing/here.txt")
+    with pytest.raises(FileNotFoundError):
+        S3Store("my-lake", client=FakeS3Client()).get_bytes("nothing/here.txt")
+
+
+def test_load_matches_returns_what_exists_and_names_what_is_missing(raw_sample, tmp_path):
+    store = LocalStore(tmp_path)
+    run_ingest("bl1", 2025, store, now=NOW, fetcher=lambda league, season: raw_sample)
+
+    matches, missing = load_matches(store, "bl1", [2024, 2025, 2026])
+
+    assert len(matches) == 4
+    assert missing == [2024, 2026]
+
+
+def test_load_matches_with_nothing_stored_returns_an_empty_table(tmp_path):
+    matches, missing = load_matches(LocalStore(tmp_path), "bl1", [2025])
+    assert matches.empty and missing == [2025]
+
+
+def test_the_same_match_id_in_two_seasons_is_rejected(raw_sample, tmp_path):
+    store = LocalStore(tmp_path)
+    run_ingest("bl1", 2025, store, now=NOW, fetcher=lambda league, season: raw_sample)
+    run_ingest("bl1", 2024, store, now=NOW, fetcher=lambda league, season: raw_sample)
+    with pytest.raises(ContractError, match="match_id"):
+        load_matches(store, "bl1", [2024, 2025])

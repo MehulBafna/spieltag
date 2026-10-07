@@ -10,7 +10,8 @@ class Store(Protocol):
     def put_bytes(self, key: str, data: bytes) -> str:
         """Write `data` under `key` and return its URI."""
 
-    def get_bytes(self, key: str) -> bytes: ...
+    def get_bytes(self, key: str) -> bytes:
+        """Read the object under `key`. Raises FileNotFoundError if there is none."""
 
 
 class LocalStore:
@@ -51,4 +52,10 @@ class S3Store:
         return f"s3://{self.bucket}/{key}"
 
     def get_bytes(self, key: str) -> bytes:
-        return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        try:
+            return self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+            if code in {"NoSuchKey", "404"}:
+                raise FileNotFoundError(f"s3://{self.bucket}/{key}") from exc
+            raise

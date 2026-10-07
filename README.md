@@ -3,16 +3,21 @@
 A self-evaluating Bundesliga forecasting pipeline on AWS. It predicts every matchday, freezes the
 predictions before kickoff, scores itself against the real results and publishes the track record.
 
-**Status: week 1 of v1.** The foundation and the data ingestion exist. Models, the Lambda, the
-schedule and the dashboard come in the next weeks.
+**Status: week 2 of v1.** Ingestion, the models and the walk-forward evaluation exist and run on
+your own machine or against the S3 data lake. The Lambda, the schedule and the dashboard come in
+week 3.
 
 | Done | Not yet |
 | --- | --- |
-| OpenLigaDB client with retries | Elo baseline and features (week 2) |
-| Data contracts (pandera) | Walk-forward evaluation (week 2) |
-| Raw snapshots and curated Parquet, local or S3 | Lambda, EventBridge, CloudFront (week 3) |
-| Terraform: state bucket, GitHub OIDC roles, budget alert, ECR, data lake bucket | CloudWatch alarms (week 3) |
-| CI: ruff, pytest, terraform fmt and validate | Deploy workflow (week 3) |
+| OpenLigaDB client with retries | Lambda, EventBridge, CloudFront (week 3) |
+| Data contracts (pandera) for matches and predictions | Frozen pre-kickoff predictions (week 3) |
+| Raw snapshots and curated Parquet, local or S3 | CloudWatch alarms (week 3) |
+| Elo ratings and point-in-time features | Deploy workflow (week 3) |
+| Three models: climatology, Elo ordered logit, feature logistic regression | Bookmaker benchmark, XGBoost, Dixon-Coles (v2) |
+| Walk-forward evaluation with RPS, log loss, Brier and calibration | |
+| Leakage tests, including a no-signal canary | |
+| Terraform: state bucket, GitHub OIDC roles, budget alert, ECR, data lake bucket | |
+| CI: ruff, pytest, terraform fmt and validate | |
 
 Data: results and fixtures come from [OpenLigaDB](https://www.openligadb.de), licensed under the ODbL.
 
@@ -30,10 +35,45 @@ spieltag-ingest --season 2025
 If validation fails, the raw answer is still saved under `data/raw/`, nothing curated changes and the
 command exits with code 2. A problem reaching the API exits with code 3.
 
-**Check the first live run.** The parser was written from the documented shape of the API. The test
-fixture is invented, and it could not be compared with a live answer while this was written. If
-`spieltag-ingest` reports a missing field, open the saved raw JSON, compare the field names with
-`src/spieltag/ingest.py`, and fix the parser and the fixture together.
+The field names, the result types and every data contract rule were checked against live OpenLigaDB
+answers for the 2025 and 2026 seasons on 7 October 2026. The test fixture is invented but has the same
+shape. If the API ever changes, `spieltag-ingest` names the missing field. Compare it with
+`src/spieltag/ingest.py` and fix the parser and the fixture together.
+
+## Evaluate the models
+
+```bash
+# after ingesting 2016 to 2026 (see "Run it locally"), locally or with --bucket
+spieltag-evaluate --first-season 2016 --out data
+```
+
+It replays history matchday by matchday, refits the three models before each one, scores every
+prediction and writes `evaluation/bl1/report.md`, `report.json` and `predictions.parquet` next to the
+data. The report holds the leaderboard, the score per season, paired comparisons with 95% intervals,
+and a calibration table. **The numbers in a report are only meaningful for the data they ran on; none
+are quoted here until they come from a real run.**
+
+### Why the numbers can be trusted
+
+- **Point in time.** The features of a match use only results that were known 24 hours before its
+  own kickoff, which is when the production pipeline will freeze its predictions. A result counts as
+  known 3 hours after its kickoff. Rest days come from the public schedule.
+- **Walk forward.** Before every matchday the models are fitted only on results known 24 hours
+  before that matchday's first kickoff. No model ever sees the matchday it predicts, let alone later
+  ones.
+- **Headline score.** Ranked probability score (lower is better), the standard for ordered football
+  outcomes, next to log loss, Brier score and calibration. Every model is compared with climatology
+  (how often home wins, draws and away wins happen), so skill is measured against something real.
+- **No tuning.** Elo constants and model settings are fixed defaults. Tuning them on the same matches
+  would flatter the result.
+- **Tested for leakage.** `tests/test_features.py` changes results that were not yet known and checks
+  that no earlier row moves, and that a match's own result never reaches its own features. A further
+  test deliberately breaks the feature builder and checks that the leakage test notices.
+  `tests/test_evaluate.py` runs the whole evaluation on a simulated league with no signal: if
+  anything leaked, a model would beat the league averages there, and the test would fail.
+
+Differences between models are reported with a 95% interval. If it contains zero, the data cannot
+tell the two models apart, and the report says so.
 
 ## Set up AWS
 
@@ -93,7 +133,9 @@ limit by name:
 ```
 infra/bootstrap/   state bucket, GitHub OIDC roles, budget alert
 infra/main/        ECR repository, data lake bucket (more each week)
-src/spieltag/      ingest.py, contracts.py, store.py, pipeline.py, cli.py
-tests/             pytest tests and an invented OpenLigaDB fixture
+src/spieltag/      ingest.py, contracts.py, store.py, pipeline.py, cli.py   (week 1)
+                   ratings.py, features.py, models.py, metrics.py,          (week 2)
+                   evaluate.py, evaluate_cli.py
+tests/             pytest tests, an invented OpenLigaDB fixture and a simulated league
 .github/workflows/ ci.yml
 ```

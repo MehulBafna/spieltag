@@ -6,6 +6,7 @@ and the previous predictions stay online (see the blueprint).
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 from pandera.errors import SchemaErrors
@@ -83,3 +84,38 @@ def validate_matches(df: pd.DataFrame) -> pd.DataFrame:
     except SchemaErrors as exc:
         cases = exc.failure_cases.to_string(max_rows=15, max_colwidth=60)
         raise ContractError(f"match data broke the contract:\n{cases}") from exc
+
+
+def _probabilities_sum_to_one(df: pd.DataFrame) -> bool:
+    return bool(np.allclose(df[["p_home", "p_draw", "p_away"]].sum(axis=1), 1.0, atol=1e-6))
+
+
+_probability = pa.Column("float64", pa.Check.in_range(0.0, 1.0))
+
+PREDICTION_SCHEMA = pa.DataFrameSchema(
+    {
+        "match_id": pa.Column("int64", pa.Check.gt(0)),
+        "season": pa.Column("int64", pa.Check.in_range(1963, 2100)),
+        "matchday": pa.Column("int64", pa.Check.in_range(1, MATCHDAYS_PER_SEASON)),
+        "kickoff_utc": pa.Column(pd.DatetimeTZDtype(tz="UTC")),
+        "model": pa.Column(str, _text),
+        "p_home": _probability,
+        "p_draw": _probability,
+        "p_away": _probability,
+        "outcome": pa.Column("int64", pa.Check.isin([0, 1, 2])),
+        "train_matches": pa.Column("int64", pa.Check.ge(0)),
+        "trained_until": pa.Column(pd.DatetimeTZDtype(tz="UTC")),
+    },
+    checks=[pa.Check(_probabilities_sum_to_one, name="probabilities_sum_to_one")],
+    unique=["match_id", "model"],
+    strict=True,
+)
+
+
+def validate_predictions(df: pd.DataFrame) -> pd.DataFrame:
+    """Return `df` unchanged if it is a valid predictions table, otherwise raise ContractError."""
+    try:
+        return PREDICTION_SCHEMA.validate(df, lazy=True)
+    except SchemaErrors as exc:
+        cases = exc.failure_cases.to_string(max_rows=15, max_colwidth=60)
+        raise ContractError(f"predictions broke the contract:\n{cases}") from exc

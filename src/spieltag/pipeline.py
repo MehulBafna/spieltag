@@ -5,15 +5,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
 
-from spieltag.contracts import validate_matches
-from spieltag.ingest import fetch_season_raw, parse_matches
+from spieltag.contracts import ContractError, validate_matches
+from spieltag.ingest import MATCH_COLUMNS, fetch_season_raw, parse_matches
 from spieltag.store import Store
 
 
@@ -77,3 +77,21 @@ def read_curated(store: Store, league: str, season: int) -> pd.DataFrame:
     """Load a curated matches table back from the store."""
     data = store.get_bytes(f"curated/matches/league={league}/season={season}/matches.parquet")
     return pd.read_parquet(io.BytesIO(data))
+
+
+def load_matches(
+    store: Store, league: str, seasons: Iterable[int]
+) -> tuple[pd.DataFrame, list[int]]:
+    """Load every available season, oldest first. Returns the table and the seasons not found."""
+    frames, missing = [], []
+    for season in seasons:
+        try:
+            frames.append(read_curated(store, league, season))
+        except FileNotFoundError:
+            missing.append(season)
+    if not frames:
+        return pd.DataFrame(columns=MATCH_COLUMNS), missing
+    matches = pd.concat(frames, ignore_index=True)
+    if matches["match_id"].duplicated().any():
+        raise ContractError("the same match_id appears in more than one season")
+    return matches, missing
