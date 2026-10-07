@@ -50,8 +50,34 @@ spieltag-evaluate --first-season 2016 --out data
 It replays history matchday by matchday, refits the three models before each one, scores every
 prediction and writes `evaluation/bl1/report.md`, `report.json` and `predictions.parquet` next to the
 data. The report holds the leaderboard, the score per season, paired comparisons with 95% intervals,
-and a calibration table. **The numbers in a report are only meaningful for the data they ran on; none
-are quoted here until they come from a real run.**
+and a calibration table. The numbers in a report are only meaningful for the data they ran on, so
+the results below are from a real run and state exactly what they cover.
+
+### Results
+
+Run on 7 October 2026. Seasons 2016 to 2026 were ingested and 2018 to 2026 were predicted: 2,484
+finished matches, of which only 36 come from the 2026 season that is still running. Lower is better.
+
+| Model | Matches | RPS | Log loss | Brier | Accuracy | RPS skill vs climatology |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| elo_ordered_logit | 2484 | 0.2048 | 0.9959 | 0.5941 | 51.2% | +11.7% |
+| feature_logit | 2484 | 0.2050 | 0.9964 | 0.5947 | 51.9% | +11.6% |
+| climatology | 2484 | 0.2320 | 1.0730 | 0.6494 | 43.6% | - |
+
+- **Both models beat the baseline.** The Elo model lowers the ranked probability score by 0.027
+  (95% interval 0.022 to 0.032), and it beats climatology in every one of the nine seasons.
+- **The simple model is as good as the rich one.** Elo alone against Elo plus form, goal margin and rest
+  days: a difference of 0.0002 with a 95% interval from -0.0013 to +0.0009. The data cannot tell them
+  apart, so the extra features add nothing measurable on top of the rating.
+- **Calibration is close for most of the range, with one weak spot.** Forecast and observed home-win
+  rates agree within a few points in most bands. For strong favourites (forecast 80 to 90 percent) the
+  home side won 68 percent of 62 matches, about three standard errors below the forecast. That is a
+  small sample, so it is a lead for v2 and not a conclusion. Any fix has to be judged by the same
+  walk-forward evaluation.
+- **No bookmaker benchmark yet.** Bookmaker odds are the standard yardstick and are not in this
+  comparison. Until v2 adds them, this project makes no claim about matching bookmakers.
+- **Season rows vary** (0.195 to 0.213 for Elo), which is ordinary luck over 306 matches. The 2026 row
+  covers 36 matches and should not be read at all.
 
 ### Why the numbers can be trusted
 
