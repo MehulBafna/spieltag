@@ -55,22 +55,40 @@ def test_local_store_round_trip(tmp_path):
     assert store.get_bytes("a/b.txt") == b"hello"
 
 
-class NoSuchKey(Exception):  # looks like the error boto3 raises
-    response = {"Error": {"Code": "NoSuchKey"}}
+class FakeS3Error(Exception):  # looks like the errors boto3 raises
+    def __init__(self, code):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
 
 
 class FakeS3Client:
+    page_size = 1000
+
     def __init__(self):
         self.objects = {}
+        self.extras = {}
 
-    def put_object(self, *, Bucket, Key, Body):  # noqa: N803 - boto3 uses these names
+    def put_object(self, *, Bucket, Key, Body, IfNoneMatch=None, **extra):  # noqa: N803
+        if IfNoneMatch == "*" and (Bucket, Key) in self.objects:
+            raise FakeS3Error("PreconditionFailed")
         self.objects[(Bucket, Key)] = Body
+        self.extras[(Bucket, Key)] = extra
 
     def get_object(self, *, Bucket, Key):  # noqa: N803
         if (Bucket, Key) not in self.objects:
-            raise NoSuchKey(Key)
+            raise FakeS3Error("NoSuchKey")
         body = self.objects[(Bucket, Key)]
         return {"Body": type("Body", (), {"read": lambda self: body})()}
+
+    def list_objects_v2(self, *, Bucket, Prefix, ContinuationToken=None):  # noqa: N803
+        keys = sorted(k for b, k in self.objects if b == Bucket and k.startswith(Prefix))
+        start = int(ContinuationToken or 0)
+        page = keys[start : start + self.page_size]
+        more = start + self.page_size < len(keys)
+        result = {"Contents": [{"Key": k} for k in page], "IsTruncated": more}
+        if more:
+            result["NextContinuationToken"] = str(start + self.page_size)
+        return result
 
 
 def test_s3_store_writes_to_the_given_bucket_and_returns_a_uri():
@@ -110,3 +128,85 @@ def test_the_same_match_id_in_two_seasons_is_rejected(raw_sample, tmp_path):
     run_ingest("bl1", 2024, store, now=NOW, fetcher=lambda league, season: raw_sample)
     with pytest.raises(ContractError, match="match_id"):
         load_matches(store, "bl1", [2024, 2025])
+
+
+def test_only_if_changed_writes_nothing_the_second_time(raw_sample, tmp_path):
+    store = LocalStore(tmp_path)
+
+    def fetch(league, season):
+        return raw_sample
+
+    first = run_ingest("bl1", 2025, store, now=NOW, fetcher=fetch, only_if_changed=True)
+    files_after_first = store.list_keys("")
+    second = run_ingest("bl1", 2025, store, now=NOW, fetcher=fetch, only_if_changed=True)
+
+    assert first.changed and not second.changed
+    assert second.matches == 4 and second.finished == 2
+    assert store.list_keys("") == files_after_first  # not even a new raw snapshot
+
+
+def test_only_if_changed_ingests_again_when_the_data_changed(raw_sample, tmp_path):
+    store = LocalStore(tmp_path)
+    run_ingest(
+        "bl1", 2025, store, now=NOW, fetcher=lambda league, season: raw_sample, only_if_changed=True
+    )
+    raw_sample[2]["matchIsFinished"] = True
+    raw_sample[2]["matchResults"] = [
+        {
+            "resultID": 1,
+            "resultName": "Endergebnis",
+            "pointsTeam1": 1,
+            "pointsTeam2": 0,
+            "resultOrderID": 1,
+            "resultTypeID": 2,
+        }
+    ]
+    again = run_ingest(
+        "bl1", 2025, store, now=NOW, fetcher=lambda league, season: raw_sample, only_if_changed=True
+    )
+    assert again.changed and again.finished == 3
+
+
+def test_an_empty_answer_is_not_an_error_for_a_scheduled_run(tmp_path):
+    result = run_ingest(
+        "bl1", 2027, LocalStore(tmp_path), fetcher=lambda league, season: [], only_if_changed=True
+    )
+    assert not result.changed and result.matches == 0
+    assert LocalStore(tmp_path).list_keys("") == []
+
+
+def test_a_failed_validation_leaves_no_marker_so_the_next_run_retries(raw_sample, tmp_path):
+    store = LocalStore(tmp_path)
+    raw_sample[0]["team2"]["teamId"] = raw_sample[0]["team1"]["teamId"]
+    with pytest.raises(ContractError):
+        run_ingest(
+            "bl1",
+            2025,
+            store,
+            now=NOW,
+            fetcher=lambda league, season: raw_sample,
+            only_if_changed=True,
+        )
+    assert not [k for k in store.list_keys("curated")]
+
+
+def test_put_if_absent_never_overwrites_in_either_store(tmp_path):
+    for store in (LocalStore(tmp_path), S3Store("my-lake", client=FakeS3Client())):
+        assert store.put_bytes_if_absent("p/a.json", b"first") is True
+        assert store.put_bytes_if_absent("p/a.json", b"second") is False
+        assert store.get_bytes("p/a.json") == b"first"
+
+
+def test_list_keys_filters_by_prefix_and_pages_through_s3(tmp_path):
+    local = LocalStore(tmp_path)
+    for key in ("a/1.txt", "a/2.txt", "b/1.txt"):
+        local.put_bytes(key, b"x")
+    assert local.list_keys("a/") == ["a/1.txt", "a/2.txt"]
+
+    client = FakeS3Client()
+    client.page_size = 2
+    s3 = S3Store("my-lake", client=client)
+    for i in range(5):
+        s3.put_bytes(f"p/{i}.txt", b"x")
+    s3.put_bytes("q/0.txt", b"x")
+    assert s3.list_keys("p/") == [f"p/{i}.txt" for i in range(5)]

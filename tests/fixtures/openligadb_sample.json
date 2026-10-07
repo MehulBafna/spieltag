@@ -12,8 +12,8 @@
     "lastUpdateDateTime": "2025-08-22T22:31:10.5",
     "matchIsFinished": true,
     "matchResults": [
-      {"resultID": 11, "resultName": "Endergebnis", "pointsTeam1": 2, "pointsTeam2": 1, "resultOrderID": 1, "resultTypeID": 2},
-      {"resultID": 12, "resultName": "Halbzeit", "pointsTeam1": 1, "pointsTeam2": 0, "resultOrderID": 2, "resultTypeID": 1}
+      {"resultID": 11, "resultName": "Halbzeit", "pointsTeam1": 1, "pointsTeam2": 0, "resultOrderID": 1, "resultTypeID": 1, "resultTypeKind": "HalfTime"},
+      {"resultID": 12, "resultName": "Endergebnis", "pointsTeam1": 2, "pointsTeam2": 1, "resultOrderID": 2, "resultTypeID": 2, "resultTypeKind": "After90Minutes"}
     ],
     "goals": []
   },

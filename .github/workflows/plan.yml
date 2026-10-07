@@ -1,0 +1,61 @@
+name: plan
+
+# On pull requests that touch the infrastructure: show what Terraform would change.
+# The plan role is read-only and can only be assumed by pull request workflows.
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/plan.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: eu-central-1
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the repository variables
+        env:
+          PLAN_ROLE: ${{ vars.AWS_PLAN_ROLE_ARN }}
+        run: |
+          [ -n "$PLAN_ROLE" ] || { echo "::error::Set the repository variable AWS_PLAN_ROLE_ARN"; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ">=1.11.0"
+          terraform_wrapper: false
+
+      - name: Plan
+        shell: bash
+        working-directory: infra/main
+        env:
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          # Keep the image tag the function runs now, so the plan only shows real changes.
+          tag=$(aws lambda get-function-configuration --function-name spieltag-pipeline \
+            --query 'Environment.Variables.SPIELTAG_CODE_VERSION' --output text 2> /dev/null || true)
+          if [ -z "$tag" ] || [ "$tag" = "None" ]; then tag=not-deployed-yet; fi
+          export TF_VAR_image_tag="$tag"
+          terraform init -input=false -backend-config="bucket=spieltag-tfstate-${account}" -backend-config="region=${AWS_REGION}"
+          # The read-only role cannot write the lock file, and a plan changes nothing.
+          terraform plan -input=false -lock=false -no-color | tee plan.txt
+          {
+            echo "### Terraform plan"
+            echo '```'
+            tail -n 60 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

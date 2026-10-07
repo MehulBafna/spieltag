@@ -17,7 +17,7 @@ def test_parse_returns_one_row_per_match_with_expected_columns(raw_sample):
 
 def test_final_score_is_picked_by_result_type_not_by_position(raw_sample):
     frame = parse_matches(raw_sample).set_index("match_id")
-    # match 1001 lists full time first, match 1002 lists half time first
+    # match 1001 lists half time first, as the real API does; match 1002 lists full time first
     assert (frame.loc[1001, "home_goals"], frame.loc[1001, "away_goals"]) == (2, 1)
     assert (frame.loc[1002, "home_goals"], frame.loc[1002, "away_goals"]) == (0, 0)
 

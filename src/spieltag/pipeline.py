@@ -26,6 +26,7 @@ class IngestResult:
     curated_uri: str
     matches: int
     finished: int
+    changed: bool = True  # False when only_if_changed found the same payload as last time
 
 
 def snapshot_id(raw: list[dict[str, Any]]) -> str:
@@ -41,13 +42,39 @@ def run_ingest(
     *,
     now: datetime | None = None,
     fetcher: Callable[[str, int], list[dict[str, Any]]] = fetch_season_raw,
+    only_if_changed: bool = False,
 ) -> IngestResult:
     """Run one ingest. The raw answer is saved first, so bad data can be inspected later.
 
     The curated table is written only after validation passes. If validation fails, a
     ContractError is raised and nothing curated changes.
+
+    With `only_if_changed`, an answer identical to the last stored one writes nothing, and an
+    empty answer (fixtures not published yet) is not an error. A scheduled job uses this so that
+    most runs leave the data lake untouched.
     """
     raw = fetcher(league, season)
+    marker_key = f"curated/matches/league={league}/season={season}/_snapshot.txt"
+    if only_if_changed:
+        if not raw:
+            return IngestResult(league, season, snapshot_id(raw), "", "", 0, 0, changed=False)
+        try:
+            unchanged = store.get_bytes(marker_key).decode().strip() == snapshot_id(raw)
+        except FileNotFoundError:
+            unchanged = False
+        if unchanged:
+            parsed = parse_matches(raw, league_season=season)
+            return IngestResult(
+                league,
+                season,
+                snapshot_id(raw),
+                "",
+                "",
+                len(parsed),
+                int(parsed["is_finished"].sum()),
+                changed=False,
+            )
+
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
     raw_uri = store.put_bytes(
         f"raw/openligadb/{league}/{season}/{stamp}.json",
@@ -61,6 +88,7 @@ def run_ingest(
     curated_uri = store.put_bytes(
         f"curated/matches/league={league}/season={season}/matches.parquet", buffer.getvalue()
     )
+    store.put_bytes(marker_key, snapshot_id(raw).encode("ascii"))  # last, so a failure retries
 
     return IngestResult(
         league=league,

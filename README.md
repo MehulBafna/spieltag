@@ -1,44 +1,85 @@
 # Spieltag
 
-A self-evaluating Bundesliga forecasting pipeline on AWS. It predicts every matchday, freezes the
-predictions before kickoff, scores itself against the real results and publishes the track record.
+A self-evaluating Bundesliga forecasting pipeline on AWS. Every hour it fetches the latest fixtures
+and results, writes a win-draw-loss forecast for each match 24 hours before kickoff, locks that
+forecast so it can never be edited, and grades it against the real result after the final whistle.
+A public dashboard shows the live track record next to a walk-forward backtest.
 
-**Status: week 2 of v1.** Ingestion, the models and the walk-forward evaluation exist and run on
-your own machine or against the S3 data lake. The Lambda, the schedule and the dashboard come in
-week 3.
+The point of the project is the honesty of the evaluation, not the sophistication of the model.
+A forecast only means something if it was made before the result was known, so the pipeline is built
+to make that provable.
 
-| Done | Not yet |
-| --- | --- |
-| OpenLigaDB client with retries | Lambda, EventBridge, CloudFront (week 3) |
-| Data contracts (pandera) for matches and predictions | Frozen pre-kickoff predictions (week 3) |
-| Raw snapshots and curated Parquet, local or S3 | CloudWatch alarms (week 3) |
-| Elo ratings and point-in-time features | Deploy workflow (week 3) |
-| Three models: climatology, Elo ordered logit, feature logistic regression | Bookmaker benchmark, XGBoost, Dixon-Coles (v2) |
-| Walk-forward evaluation with RPS, log loss, Brier and calibration | |
-| Leakage tests, including a no-signal canary | |
-| Terraform: state bucket, GitHub OIDC roles, budget alert, ECR, data lake bucket | |
-| CI: ruff, pytest, terraform fmt and validate | |
+**Status: v1 complete.** Ingestion, three models, walk-forward evaluation, the scheduled pipeline,
+frozen forecasts, live scoring, the dashboard, alarms and the deploy workflow are all in this repository.
 
 Data: results and fixtures come from [OpenLigaDB](https://www.openligadb.de), licensed under the ODbL.
 
-## Run it locally
+## How it fits together
 
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-
-# fetch one season, validate it, write raw JSON and a curated Parquet file under ./data
-spieltag-ingest --season 2025
+```mermaid
+flowchart LR
+    API[OpenLigaDB] --> L
+    EB[EventBridge Scheduler<br/>every hour] --> L
+    subgraph AWS
+        L[Lambda container<br/>ingest, freeze, score, publish]
+        S3[(S3 data lake<br/>raw, curated, predictions, site)]
+        CF[CloudFront]
+        CW[CloudWatch alarms]
+        SNS[Email via SNS]
+        L <--> S3
+        S3 --> CF
+        L -. metrics .-> CW --> SNS
+    end
+    CF --> D[Dashboard]
+    GH[GitHub Actions<br/>OIDC, no stored keys] -->|image, Terraform, site files| AWS
 ```
 
-If validation fails, the raw answer is still saved under `data/raw/`, nothing curated changes and the
-command exits with code 2. A problem reaching the API exits with code 3.
+Each hour the Lambda function does four things, in this order (`src/spieltag/cycle.py`):
 
-The field names, the result types and every data contract rule were checked against live OpenLigaDB
-answers for the 2025 and 2026 seasons on 7 October 2026. The test fixture is invented but has the same
-shape. If the API ever changes, `spieltag-ingest` names the missing field. Compare it with
-`src/spieltag/ingest.py` and fix the parser and the fixture together.
+1. **Ingest** the current season. If the API is down or the data breaks its contract, the run carries
+   on with the data already stored, and the failure is reported instead of hidden.
+2. **Freeze** a forecast for every match that is within 24 hours of kickoff and has none yet.
+3. **Score** every frozen forecast whose match has finished.
+4. **Publish** four small JSON files that the static dashboard reads.
+
+## How the self-evaluation works
+
+A frozen forecast is one JSON file per match (`predictions/league=bl1/season=2026/match_id=....json`):
+
+```json
+{
+  "match_id": 2020001, "kickoff_utc": "2020-08-14T18:00:00Z",
+  "as_of_utc": "2020-08-13T18:00:00Z", "frozen_at_utc": "2020-08-14T00:00:00Z",
+  "models": { "elo_ordered_logit": {"p_home": 0.408, "p_draw": 0.271, "p_away": 0.321}, "...": "..." },
+  "features": { "elo_diff": 7.2, "form_home": 2.0, "rest_days_home": 14.0, "...": "..." },
+  "training": { "trained_until": "2020-08-13T18:00:00Z", "matches": 1224, "data_fingerprint": "b2409ac6d293" },
+  "code_version": "3f9c1e0a77b2",
+  "fingerprint": "a4f2bf8f..."
+}
+```
+
+What makes it trustworthy:
+
+- **Written once.** Every write uses an S3 conditional write (`If-None-Match: *`), so a second write for
+  the same match is refused, even if two runs overlap. The bucket policy goes further: it denies every
+  write under `predictions/` that is not conditional, and denies deletes there. Nobody can replace a
+  forecast, the pipeline included, without first changing the bucket policy, which shows up in the logs.
+- **Tamper evident.** Each record carries a SHA-256 fingerprint of its own content. A record that
+  fails the check is excluded from scoring, reported on the dashboard and raises an alarm.
+- **Only what was known.** Features are rebuilt as of 24 hours before kickoff, and the models are
+  trained on results that were final at that moment. A result counts as known 3 hours after kickoff.
+- **Never after kickoff.** The pipeline only freezes matches whose kickoff is still in the future. If
+  a run is missed, the match is reported as missed, an alarm fires and nothing is backfilled. A match
+  that kicked off before the pipeline first ran is never counted.
+- **Same code as the backtest.** A replay test (`tests/test_cycle.py`) runs a simulated season hour by
+  hour through the real parser, contracts and storage layer, and checks that every live forecast equals
+  what the walk-forward backtest says it would have been, to nine decimal places. The two paths cut their
+  training data with one shared function. The tests also break the code on purpose (freeze after kickoff,
+  allow overwrites, train on newer results) and confirm that they fail.
+
+The honest limit: live and backtest agree exactly only if the data arrives on time. If OpenLigaDB
+publishes a result late, the live features lack it while the backtest assumes it was known after three
+hours. The record keeps a fingerprint of the exact training data, so such a difference can be traced.
 
 ## Evaluate the models
 
@@ -50,8 +91,7 @@ spieltag-evaluate --first-season 2016 --out data
 It replays history matchday by matchday, refits the three models before each one, scores every
 prediction and writes `evaluation/bl1/report.md`, `report.json` and `predictions.parquet` next to the
 data. The report holds the leaderboard, the score per season, paired comparisons with 95% intervals,
-and a calibration table. The numbers in a report are only meaningful for the data they ran on, so
-the results below are from a real run and state exactly what they cover.
+and a calibration table. The pipeline publishes `report.json` as the dashboard's backtest panel.
 
 ### Results
 
@@ -79,14 +119,12 @@ finished matches, of which only 36 come from the 2026 season that is still runni
 - **Season rows vary** (0.195 to 0.213 for Elo), which is ordinary luck over 306 matches. The 2026 row
   covers 36 matches and should not be read at all.
 
-### Why the numbers can be trusted
+### Why the backtest can be trusted
 
 - **Point in time.** The features of a match use only results that were known 24 hours before its
-  own kickoff, which is when the production pipeline will freeze its predictions. A result counts as
-  known 3 hours after its kickoff. Rest days come from the public schedule.
+  own kickoff, which is when the pipeline freezes its forecasts. Rest days come from the public schedule.
 - **Walk forward.** Before every matchday the models are fitted only on results known 24 hours
-  before that matchday's first kickoff. No model ever sees the matchday it predicts, let alone later
-  ones.
+  before that matchday's first kickoff. No model ever sees the matchday it predicts, let alone later ones.
 - **Headline score.** Ranked probability score (lower is better), the standard for ordered football
   outcomes, next to log loss, Brier score and calibration. Every model is compared with climatology
   (how often home wins, draws and away wins happen), so skill is measured against something real.
@@ -99,51 +137,105 @@ finished matches, of which only 36 come from the 2026 season that is still runni
   anything leaked, a model would beat the league averages there, and the test would fail.
 
 Differences between models are reported with a 95% interval. If it contains zero, the data cannot
-tell the two models apart, and the report says so.
+tell the two models apart, and the dashboard says so. The live record needs 30 graded matches before
+it gives a first verdict, and it will take a few matchdays to get there.
 
-## Set up AWS
-
-You need an AWS account, the AWS CLI, Terraform 1.11 or newer, and an empty GitHub repository named
-like the one in your `terraform.tfvars`.
-
-**Do not use root access keys.** Create an admin user in IAM Identity Center (or an IAM user with MFA),
-sign in with `aws configure sso` and check `aws sts get-caller-identity` before you start.
+## Run it locally
 
 ```bash
-# 1. Bootstrap, once, with local state
+python -m venv .venv && source .venv/bin/activate     # on Windows: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+pytest
+
+spieltag-ingest --season 2025                          # one season into ./data
+spieltag-run --backfill --first-season 2016            # all seasons, then one full cycle
+```
+
+`spieltag-run` runs exactly what the Lambda runs, against a local folder (or `--bucket`). To see the
+dashboard on your machine, copy the static files next to the data the cycle wrote and serve them:
+
+```bash
+mkdir -p data/site && cp -r site/. data/site/ && python -m http.server -d data/site 8000
+```
+
+`spieltag-run --now 2026-10-09T12:00:00Z` pretends it is that time, for replays and demos. The Lambda
+never accepts a time override.
+
+If ingest validation fails, the raw answer is still saved under `data/raw/`, nothing curated changes and
+`spieltag-ingest` exits with code 2. A problem reaching the API exits with code 3.
+
+## Deploy
+
+You need an AWS account, the AWS CLI, Terraform 1.11 or newer, and a GitHub repository.
+
+**Do not use root access keys.** Create an admin user in IAM with MFA, sign in with `aws configure`
+and check `aws sts get-caller-identity` before you start.
+
+```bash
+# 1. Bootstrap, once, with local state: state bucket, GitHub OIDC roles, budget alert
 cd infra/bootstrap
-cp terraform.tfvars.example terraform.tfvars   # set github_owner, github_repo, alert_email
-terraform fmt -recursive ..                    # one-time tidy before the first commit
-terraform init
-terraform apply
+cp terraform.tfvars.example terraform.tfvars    # set github_owner, github_repo, alert_email
+terraform init && terraform apply
 cd ../..
 
-# 2. Main stack, with state in the new bucket
+# 2. Create just the data lake bucket, so there is somewhere to load history into.
+#    (The deploy workflow creates everything else, including the image registry.)
 terraform -chdir=infra/main init \
   -backend-config="bucket=$(terraform -chdir=infra/bootstrap output -raw state_bucket)" \
   -backend-config="region=eu-central-1"
-terraform -chdir=infra/main apply
+terraform -chdir=infra/main apply -target=aws_s3_bucket.lake \
+  -var alert_email=you@example.com -var image_tag=bootstrap
 
-# 3. First ingest straight into S3
-spieltag-ingest --season 2025 --bucket "$(terraform -chdir=infra/main output -raw lake_bucket)"
+# 3. Load history into the lake (about a minute)
+spieltag-ingest --season 2016 --bucket spieltag-lake-<account id>      # and so on to the current season
+spieltag-evaluate --bucket spieltag-lake-<account id>                  # the backtest the dashboard shows
 ```
 
-Then, in the GitHub repository settings, add two repository **variables** (not secrets) from the
-bootstrap outputs: `AWS_DEPLOY_ROLE_ARN` and `AWS_PLAN_ROLE_ARN`. The deploy workflow in week 3 uses them.
+Then, in the GitHub repository settings under *Secrets and variables, Actions, Variables*, add three
+repository **variables** (not secrets): `AWS_DEPLOY_ROLE_ARN` and `AWS_PLAN_ROLE_ARN` from the
+bootstrap outputs, and `ALERT_EMAIL`.
 
-The bootstrap state file stays on your computer (`infra/bootstrap/terraform.tfstate`, ignored by git).
-It describes only the bootstrap resources. Keep a copy somewhere safe.
+From then on, every push to `main` runs `.github/workflows/deploy.yml`:
+
+1. ruff and pytest must pass,
+2. the image registry is created if it is missing, then the pipeline image is built and pushed to it, tagged with the commit hash,
+3. `terraform apply` creates or updates the Lambda, the schedule, CloudFront and the alarms,
+4. the dashboard files are copied to S3 and the CloudFront cache is cleared,
+5. the pipeline runs once and the workflow fails if it errors or if the dashboard does not answer.
+
+Pull requests that touch `infra/` get a read-only `terraform plan` in their job summary.
+
+The first deploy ends with the dashboard URL in the job summary. AWS also emails a subscription
+confirmation to `ALERT_EMAIL`. Click it, or the alarms cannot reach you.
+
+The dashboard needs no database or server. It is static files plus four JSON files under `site/data/`
+that the pipeline rewrites every hour.
+
+## Operating it
+
+| Alarm | What it means | What to do |
+| --- | --- | --- |
+| `spieltag-function-errors` | The function crashed or could not write forecasts. | Open the log group `/aws/lambda/spieltag-pipeline` and look for `cycle_crashed` or `freeze_failed`. |
+| `spieltag-no-recent-run` | No completed run for three hours. | Check that the schedule is enabled and the function is not failing. Check the account's billing status. |
+| `spieltag-missed-forecast` | A match kicked off without a frozen forecast. | It cannot be fixed afterwards, by design. Find the cause (usually an earlier outage). The alarm clears after three days. `status.json` keeps the lifetime count in `missed_total`. |
+| `spieltag-ingest-failing` | Fetching or validating match data failed for six hours. | Forecasts continue from stored data. Look for `ingest_failed` in the logs. If OpenLigaDB changed its format, fix `ingest.py` and its test fixture together. |
+| `spieltag-problem-records` | A frozen forecast failed its fingerprint check, or the data has a gap. | Read `problems` in `status.json`. Treat a fingerprint failure as a serious event. |
+
+The dashboard shows the same health state at the top. It turns amber when something needs attention
+and red when the data is more than three hours old.
 
 ## Cost and safety
 
-- The budget alert is created first. It emails you at 80 percent of the actual monthly limit and at
-  100 percent of the forecast. It ignores credits on purpose, so it still fires while credits pay the bill.
+- Expected running cost is well under 1 USD a month: one short Lambda run an hour, a few megabytes in
+  S3, a small container image, a handful of alarms. The budget alert exists to catch the case where
+  that is wrong. It emails you at 80 percent of the actual monthly limit and at 100 percent of the
+  forecast, and it ignores credits on purpose, so it still fires while credits pay the bill.
 - If your account is on the AWS Free plan, upgrade to the Paid plan before the plan ends, otherwise the
   account closes with everything in it. The Billing console shows the date.
-- `terraform destroy` in `infra/main` removes the stack. Empty the lake bucket first, versioned
-  buckets cannot be deleted while they hold objects.
+- `terraform destroy` in `infra/main` removes the stack. The bucket policy denies deleting forecasts,
+  so to destroy the lake you must remove that statement first. That is intended.
 
-## Known limits of the deploy role
+### Known limits of the deploy role
 
 The deploy role can only touch resources named `spieltag-...`, with three exceptions that AWS cannot
 limit by name:
@@ -154,14 +246,33 @@ limit by name:
   the repository public or add collaborators.
 - **ReadOnlyAccess** is attached to both roles so Terraform can refresh state. It can read most of the account.
 
+## What v1 does not do
+
+- **No bookmaker benchmark.** Without odds, nothing here says how the models compare with the market.
+- **Few live matches at first.** The live record starts on the day of the first deploy. Until 30
+  matches are graded, the dashboard says it is too early to call.
+- **Simple models.** Elo with an ordered logit, and a regularised logistic regression on form and rest.
+  Dixon-Coles, gradient boosting and a calibration layer are the next candidates, each judged by the
+  same walk-forward evaluation.
+- **One league, one data source.** If OpenLigaDB changes or disappears, the ingest step fails loudly.
+
 ## Layout
 
 ```
 infra/bootstrap/   state bucket, GitHub OIDC roles, budget alert
-infra/main/        ECR repository, data lake bucket (more each week)
-src/spieltag/      ingest.py, contracts.py, store.py, pipeline.py, cli.py   (week 1)
-                   ratings.py, features.py, models.py, metrics.py,          (week 2)
-                   evaluate.py, evaluate_cli.py
-tests/             pytest tests, an invented OpenLigaDB fixture and a simulated league
-.github/workflows/ ci.yml
+infra/main/        main.tf   ECR, data lake bucket and its policy
+                   app.tf    Lambda function, its role, the hourly schedule
+                   site.tf   CloudFront with origin access control and security headers
+                   alarms.tf SNS topic and the five alarms
+src/spieltag/      ingest.py, contracts.py, store.py, pipeline.py        ingest
+                   ratings.py, features.py, models.py, metrics.py        modelling
+                   evaluate.py, evaluate_cli.py                          backtest
+                   frozen.py, live.py, cycle.py, handler.py, run_cli.py  production
+site/              the dashboard: index.html, style.css, app.js, one self-hosted font
+tests/             pytest tests, a simulated league and a simulated clock for replays
+.github/workflows/ ci.yml, deploy.yml, plan.yml
+Dockerfile         the Lambda image, dependencies pinned in constraints.txt
 ```
+
+The dashboard font is Archivo (SIL Open Font License, `site/fonts/OFL.txt`), served from the same
+origin so visitors make no requests to third parties.

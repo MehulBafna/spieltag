@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spieltag: Bundesliga forecasts sealed before kickoff</title>
+  <meta name="description" content="Bundesliga win, draw and loss probabilities that are written once, 24 hours before kickoff, and graded against the real result.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="fonts/archivo-latin-variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#next">Skip to the forecasts</a>
+
+  <header class="band">
+    <div class="wrap">
+      <div class="top">
+        <span class="brand">Spieltag</span>
+        <p class="health" id="health" role="status" aria-live="polite">Checking the pipeline</p>
+      </div>
+
+      <div class="hero">
+        <div class="hero-text">
+          <h1><span>Forecasts are sealed before kickoff.</span> <span>Then they are graded.</span></h1>
+          <p class="lede">Win, draw and loss probabilities for every Bundesliga match, written once 24 hours before the first whistle and scored against the real result. Nothing is edited afterwards.</p>
+        </div>
+        <div class="hero-figure" id="hero-figure" aria-live="polite"></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="next" aria-labelledby="next-h">
+      <div class="section-head">
+        <h2 id="next-h">Next fixtures</h2>
+        <ul class="key" aria-label="Colour key">
+          <li><span class="swatch home"></span>Home win</li>
+          <li><span class="swatch draw"></span>Draw</li>
+          <li><span class="swatch away"></span>Away win</li>
+        </ul>
+      </div>
+      <div id="fixtures" class="fixtures" aria-live="polite"></div>
+    </section>
+
+    <section id="proof" aria-labelledby="proof-h">
+      <h2 id="proof-h">Is it any good?</h2>
+      <p class="intro">Two questions. Would the method have worked on past seasons, and is it working now? The first answer comes from a walk-forward backtest, where every forecast only used results that were already known. The second comes from forecasts sealed before the match.</p>
+
+      <figure class="chart" id="forest-chart">
+        <figcaption>
+          <strong>Improvement over league averages</strong>
+          <span>How much lower the model's error is than a forecast that only knows how often home wins, draws and away wins happen. Dots are averages, lines are 95% intervals.</span>
+        </figcaption>
+        <div class="plot" id="forest"></div>
+        <details class="table-view"><summary>Show as table</summary><div id="model-table"></div></details>
+      </figure>
+
+      <div class="chart-pair">
+        <figure class="chart" id="calibration-chart">
+          <figcaption>
+            <strong id="calibration-title">Calibration in the backtest</strong>
+            <span>When the model gives the home side a certain chance, how often does the home side win? Dots on the diagonal mean the probabilities can be taken at face value.</span>
+          </figcaption>
+          <div class="plot" id="calibration"></div>
+          <details class="table-view"><summary>Show as table</summary><div id="calibration-table"></div></details>
+        </figure>
+
+        <figure class="chart" id="trend-chart">
+          <figcaption>
+            <strong>Live improvement over league averages</strong>
+            <span>Running result after each matchday of forecasts that were sealed before kickoff.</span>
+          </figcaption>
+          <div class="plot" id="trend"></div>
+          <details class="table-view"><summary>Show as table</summary><div id="trend-table"></div></details>
+        </figure>
+      </div>
+    </section>
+
+    <section id="results" aria-labelledby="results-h">
+      <div class="section-head">
+        <h2 id="results-h">Latest graded matches</h2>
+        <p class="note">The result that happened keeps its full colour.</p>
+      </div>
+      <div id="recent" class="fixtures" aria-live="polite"></div>
+    </section>
+
+    <section id="method" aria-labelledby="method-h">
+      <h2 id="method-h">How it stays honest</h2>
+      <dl class="method">
+        <div><dt>Sealed once</dt><dd>Each forecast is a separate file written with a conditional write. A second write for the same match is refused by the storage service itself, and every file carries a fingerprint that exposes edits.</dd></div>
+        <div><dt>Only what was known</dt><dd>Models learn from results that were final when the forecast was sealed, and ratings and form are rebuilt as of that moment. A result counts as known three hours after kickoff.</dd></div>
+        <div><dt>Same code as the backtest</dt><dd>A replay test runs a simulated season hour by hour and checks that the live pipeline's forecasts equal the backtest's, to the last digit.</dd></div>
+        <div><dt>Misses are counted</dt><dd>If a run is missed, the match is reported as missed and an alarm fires. A forecast is never written after kickoff, and never backfilled.</dd></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <p>Match data from <a href="https://www.openligadb.de" rel="noopener">OpenLigaDB</a>, licensed under the ODbL. Forecasts are statistical estimates, not betting advice.</p>
+    <p>Built by Mehul Bafna. <a href="https://github.com/MehulBafna/spieltag" rel="noopener">Source code on GitHub</a>.</p>
+  </footer>
+
+  <div id="tip" class="tip" role="tooltip" hidden></div>
+</body>
+</html>

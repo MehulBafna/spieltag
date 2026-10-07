@@ -44,6 +44,21 @@ PREDICTION_COLUMNS = [
 ]
 
 
+def round_starts(features: pd.DataFrame) -> pd.Series:
+    """First kickoff of every matchday, indexed by (season, matchday)."""
+    return features.groupby(["season", "matchday"])["kickoff_utc"].min()
+
+
+def training_window(features: pd.DataFrame, frozen_at: pd.Timestamp) -> pd.DataFrame:
+    """The finished matches whose result was already known at `frozen_at`.
+
+    The backtest and the live pipeline both cut their training data with this one function, so
+    what the live models learn from is, by construction, what the backtest said they would.
+    """
+    finished = features[features["is_finished"]]
+    return finished[finished["kickoff_utc"] + RESULT_DELAY <= frozen_at]
+
+
 def walk_forward(
     features: pd.DataFrame,
     factories: dict[str, Callable[[], Model]],
@@ -57,15 +72,14 @@ def walk_forward(
     Returns one row per match and model. Matchdays with fewer than `min_train_matches` finished
     training matches are skipped.
     """
-    finished = features[features["is_finished"]].copy()
-    finished["known_at"] = finished["kickoff_utc"] + RESULT_DELAY
-    round_start = features.groupby(["season", "matchday"])["kickoff_utc"].min()
+    finished = features[features["is_finished"]]
+    starts = round_starts(features)
 
     pieces: list[pd.DataFrame] = []
     test_pool = finished[finished["season"] >= first_test_season]
     for (season, matchday), games in test_pool.groupby(["season", "matchday"], sort=True):
-        frozen_at = round_start[(season, matchday)] - lead
-        train = finished[finished["known_at"] <= frozen_at]
+        frozen_at = starts[(season, matchday)] - lead
+        train = training_window(features, frozen_at)
         if len(train) < min_train_matches:
             continue
         for name, factory in factories.items():

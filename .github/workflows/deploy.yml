@@ -1,0 +1,174 @@
+name: deploy
+
+# Every push to main: test, build the pipeline image, apply the infrastructure, publish the
+# dashboard files, run the pipeline once and check that the dashboard answers.
+# AWS sign-in uses OIDC, so no AWS keys are stored in GitHub.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-central-1
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Test
+        run: pytest
+
+  deploy:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the repository variables
+        env:
+          DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
+        run: |
+          missing=0
+          [ -n "$DEPLOY_ROLE" ] || { echo "::error::Set the repository variable AWS_DEPLOY_ROLE_ARN"; missing=1; }
+          [ -n "$ALERT_EMAIL" ] || { echo "::error::Set the repository variable ALERT_EMAIL"; missing=1; }
+          exit $missing
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Work out names
+        id: names
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          {
+            echo "tag=${GITHUB_SHA::12}"
+            echo "registry=${account}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            echo "lake=spieltag-lake-${account}"
+            echo "state=spieltag-tfstate-${account}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ">=1.11.0"
+          terraform_wrapper: false
+
+      # The image needs a registry to land in, and the Lambda needs the image, so the registry is
+      # created first. On later runs this changes nothing and takes a few seconds.
+      - name: Make sure the image registry exists
+        working-directory: infra/main
+        env:
+          STATE_BUCKET: ${{ steps.names.outputs.state }}
+          TF_VAR_image_tag: ${{ steps.names.outputs.tag }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+        run: |
+          terraform init -input=false -backend-config="bucket=${STATE_BUCKET}" -backend-config="region=${AWS_REGION}"
+          terraform apply -auto-approve -input=false \
+            -target=aws_ecr_repository.app \
+            -target=aws_ecr_lifecycle_policy.keep_recent \
+            -target=aws_ecr_repository_policy.app
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the pipeline image
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+          REGISTRY: ${{ steps.names.outputs.registry }}
+        run: |
+          image="${REGISTRY}/spieltag-pipeline:${TAG}"
+          if aws ecr describe-images --repository-name spieltag-pipeline --image-ids imageTag="$TAG" > /dev/null 2>&1; then
+            echo "Image ${TAG} is already in the registry, reusing it."
+          else
+            # Lambda cannot run the attestation manifests that buildx adds by default.
+            docker build --provenance=false --sbom=false --platform linux/amd64 -t "$image" .
+            docker push "$image"
+          fi
+
+      - name: Apply the infrastructure
+        id: tf
+        working-directory: infra/main
+        env:
+          TF_VAR_image_tag: ${{ steps.names.outputs.tag }}
+          TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+        run: |
+          terraform apply -auto-approve -input=false
+          {
+            echo "site_url=$(terraform output -raw site_url)"
+            echo "distribution=$(terraform output -raw cloudfront_distribution_id)"
+            echo "function=$(terraform output -raw lambda_function_name)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish the dashboard files
+        env:
+          LAKE: ${{ steps.names.outputs.lake }}
+          DISTRIBUTION: ${{ steps.tf.outputs.distribution }}
+        run: |
+          # data/ belongs to the pipeline, so it is never touched here.
+          aws s3 sync site "s3://${LAKE}/site" --exclude "data/*" --exclude "fonts/*" \
+            --cache-control "public, max-age=300" --only-show-errors
+          aws s3 sync site/fonts "s3://${LAKE}/site/fonts" \
+            --cache-control "public, max-age=86400" --only-show-errors
+          aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION" --paths "/*" > /dev/null
+
+      - name: Run the pipeline once
+        env:
+          FUNCTION: ${{ steps.tf.outputs.function }}
+        run: |
+          aws lambda invoke --function-name "$FUNCTION" --cli-binary-format raw-in-base64-out \
+            --cli-read-timeout 330 --payload '{}' --log-type Tail response.json > invoke.json
+          echo "--- last log lines"
+          jq -r '.LogResult' invoke.json | base64 -d | tail -n 8
+          if jq -e '.FunctionError' invoke.json > /dev/null; then
+            echo "::error::The pipeline function failed"
+            cat response.json
+            exit 1
+          fi
+          jq '{ingest_status, frozen_now, frozen_total, scored, missed, problems}' response.json
+
+      - name: Check the dashboard
+        env:
+          SITE_URL: ${{ steps.tf.outputs.site_url }}
+        run: |
+          code=000
+          for attempt in 1 2 3 4 5 6; do
+            code=$(curl -s -o status.json -w '%{http_code}' "${SITE_URL}/data/status.json" || true)
+            [ "$code" = "200" ] && break
+            echo "status.json answered ${code}, waiting"
+            sleep 15
+          done
+          [ "$code" = "200" ] || { echo "::error::The dashboard did not serve status.json"; exit 1; }
+          jq '{generated_at, healthy, counts}' status.json
+          curl -sf -o /dev/null "${SITE_URL}/index.html"
+          {
+            echo "### Deployed"
+            echo "Dashboard: ${SITE_URL}"
+            echo "Image: \`${GITHUB_SHA::12}\`"
+            echo "If this is the first deploy, confirm the subscription email from AWS Notifications, or the alarms cannot reach you."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -26,6 +26,11 @@ from spieltag.features import MODEL_FEATURES
 
 _EPS = 1e-12
 
+# Chosen before any result was looked at: the simplest model that uses the ratings is the one the
+# project is judged on, and the league averages are what it has to beat.
+PRIMARY_MODEL = "elo_ordered_logit"
+REFERENCE_MODEL = "climatology"
+
 
 class Model(Protocol):
     name: str

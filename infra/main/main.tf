@@ -1,5 +1,5 @@
-# Main stack, week 1: the container registry and the data lake bucket.
-# Lambda, EventBridge, CloudFront and CloudWatch are added in the next weeks.
+# Main stack: the container registry and the data lake bucket (this file), the scheduled Lambda
+# (app.tf), the public dashboard (site.tf) and the alarms (alarms.tf).
 
 data "aws_caller_identity" "current" {}
 
@@ -32,12 +32,12 @@ resource "aws_ecr_lifecycle_policy" "keep_recent" {
     rules = [
       {
         rulePriority = 1
-        description  = "Keep the 10 most recent images"
+        description  = "Keep the 3 most recent images"
 
         selection = {
           tagStatus   = "any"
           countType   = "imageCountMoreThan"
-          countNumber = 10
+          countNumber = 3
         }
 
         action = {
@@ -46,6 +46,35 @@ resource "aws_ecr_lifecycle_policy" "keep_recent" {
       }
     ]
   })
+}
+
+# Lambda pulls the image with its own service permissions. This limits that to this project's
+# functions.
+data "aws_iam_policy_document" "ecr_pull" {
+  statement {
+    sid = "LambdaCanPullThisProjectsImages"
+
+    actions = [
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "aws:sourceArn"
+      values   = ["arn:aws:lambda:${var.region}:${local.account_id}:function:${var.project}-*"]
+    }
+  }
+}
+
+resource "aws_ecr_repository_policy" "app" {
+  repository = aws_ecr_repository.app.name
+  policy     = data.aws_iam_policy_document.ecr_pull.json
 }
 
 # ---------------------------------------------------------------------------
@@ -101,10 +130,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "lake" {
     }
   }
 
+  # The dashboard's JSON files are rewritten every hour. Keep their old versions only briefly.
+  rule {
+    id     = "expire-old-dashboard-data"
+    status = "Enabled"
+
+    filter {
+      prefix = "site/data/"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 3
+    }
+  }
+
   depends_on = [aws_s3_bucket_versioning.lake]
 }
 
-data "aws_iam_policy_document" "lake_tls_only" {
+data "aws_iam_policy_document" "lake" {
   statement {
     sid    = "DenyInsecureTransport"
     effect = "Deny"
@@ -127,11 +170,68 @@ data "aws_iam_policy_document" "lake_tls_only" {
       values   = ["false"]
     }
   }
+
+  # A frozen forecast is final. Every write under predictions/ must be a conditional write that
+  # only succeeds if the object does not exist yet, so nobody, the pipeline included, can
+  # replace one. Changing this takes an explicit change to the bucket policy.
+  statement {
+    sid    = "PredictionsAreWriteOnce"
+    effect = "Deny"
+
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.lake.arn}/predictions/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "s3:if-none-match"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    sid    = "PredictionsCannotBeDeleted"
+    effect = "Deny"
+
+    actions = [
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+    resources = ["${aws_s3_bucket.lake.arn}/predictions/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+  }
+
+  # The dashboard is served from site/ only. Everything else in the bucket stays private.
+  statement {
+    sid     = "CloudFrontReadsTheSite"
+    actions = ["s3:GetObject"]
+
+    resources = ["${aws_s3_bucket.lake.arn}/site/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceArn"
+      values   = [aws_cloudfront_distribution.site.arn]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "lake" {
   bucket = aws_s3_bucket.lake.id
-  policy = data.aws_iam_policy_document.lake_tls_only.json
+  policy = data.aws_iam_policy_document.lake.json
 
   depends_on = [aws_s3_bucket_public_access_block.lake]
 }
