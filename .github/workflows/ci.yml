@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Test
+        run: pytest
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ">=1.11.0"
+
+      - name: Format check
+        run: terraform fmt -check -recursive infra
+
+      - name: Validate bootstrap
+        working-directory: infra/bootstrap
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Validate main
+        working-directory: infra/main
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate

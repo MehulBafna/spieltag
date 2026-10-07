@@ -1,0 +1,3 @@
+github_owner = "your-github-username"
+github_repo  = "spieltag"
+alert_email  = "you@example.com"
