@@ -28,6 +28,7 @@ dev = [
 spieltag-ingest = "spieltag.cli:main"
 spieltag-evaluate = "spieltag.evaluate_cli:main"
 spieltag-run = "spieltag.run_cli:main"
+spieltag-inplay-fit = "spieltag.inplay_fit_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

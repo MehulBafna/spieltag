@@ -38,6 +38,18 @@ variable "schedule_expression" {
   default     = "cron(5 * * * ? *)"
 }
 
+variable "inplay_enabled" {
+  description = "Run the live in-play estimates. Set to false to switch the feature off without touching anything else."
+  type        = bool
+  default     = true
+}
+
+variable "inplay_schedule_expression" {
+  description = "When the live estimates update (UTC). The default is every five minutes."
+  type        = string
+  default     = "cron(0/5 * * * ? *)"
+}
+
 variable "lambda_memory_mb" {
   description = "Memory of the pipeline function. More memory also means more CPU."
   type        = number

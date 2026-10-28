@@ -1,4 +1,5 @@
-# The pipeline: one container image run by Lambda, started every hour by EventBridge Scheduler.
+# The pipeline: one container image run by Lambda. EventBridge Scheduler starts it every hour for
+# the main cycle, and every five minutes for the live in-play estimates.
 
 locals {
   function_name = "${var.project}-pipeline"
@@ -36,6 +37,7 @@ data "aws_iam_policy_document" "pipeline" {
       "${local.lake_arn}/predictions/*",
       "${local.lake_arn}/meta/*",
       "${local.lake_arn}/evaluation/*",
+      "${local.lake_arn}/inplay/*",
       "${local.lake_arn}/site/data/*",
     ]
   }
@@ -49,6 +51,7 @@ data "aws_iam_policy_document" "pipeline" {
       "${local.lake_arn}/curated/*",
       "${local.lake_arn}/predictions/*",
       "${local.lake_arn}/meta/*",
+      "${local.lake_arn}/inplay/*",
       "${local.lake_arn}/site/data/*",
     ]
   }
@@ -165,6 +168,32 @@ resource "aws_scheduler_schedule" "pipeline" {
     retry_policy {
       maximum_retry_attempts       = 0
       maximum_event_age_in_seconds = 300
+    }
+  }
+
+  depends_on = [aws_iam_role_policy.scheduler]
+}
+
+# The live in-play estimates. Every tick is cheap: unless a sealed match has kicked off in the last
+# few hours the function returns at once. Switch the whole feature off with inplay_enabled = false.
+resource "aws_scheduler_schedule" "inplay" {
+  name                = "${var.project}-inplay-5min"
+  description         = "Update the live win probabilities of matches in play."
+  schedule_expression = var.inplay_schedule_expression
+  state               = var.inplay_enabled ? "ENABLED" : "DISABLED"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_lambda_function.pipeline.arn
+    role_arn = aws_iam_role.scheduler.arn
+    input    = jsonencode({ source = "schedule", task = "inplay" })
+
+    retry_policy {
+      maximum_retry_attempts       = 0
+      maximum_event_age_in_seconds = 120
     }
   }
 

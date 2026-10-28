@@ -101,3 +101,22 @@ resource "aws_cloudwatch_metric_alarm" "problem_records" {
   alarm_actions       = local.alarm_actions
   ok_actions          = local.alarm_actions
 }
+
+# A sealed match is in play but the live feed has failed three ticks in a row (15 minutes). The
+# sealed forecasts are not affected; only the live line on the dashboard is stale.
+resource "aws_cloudwatch_metric_alarm" "inplay_feed_failing" {
+  alarm_name          = "${var.project}-inplay-feed-failing"
+  alarm_description   = "The live match feed failed for 15 minutes during a match. The live line is stale."
+  namespace           = "Spieltag"
+  metric_name         = "InplayFeedFailed"
+  dimensions          = local.league_dim
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = local.alarm_actions
+  ok_actions          = local.alarm_actions
+}

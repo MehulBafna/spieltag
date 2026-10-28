@@ -81,6 +81,51 @@ The honest limit: live and backtest agree exactly only if the data arrives on ti
 publishes a result late, the live features lack it while the backtest assumes it was known after three
 hours. The record keeps a fingerprint of the exact training data, so such a difference can be traced.
 
+## The live line (in-play estimate)
+
+Under each sealed forecast the dashboard shows a second line that updates every five minutes while the
+match is played. It is a different thing from the sealed forecast and is kept apart from it: stored under
+`inplay/`, never written to `predictions/`, and scored on its own.
+
+**The model.** A Poisson goal process. The sealed home, draw and away probabilities are turned into the
+expected goals of each team over 90 minutes (`fit_rates`). Each minute carries a share of those goals
+(45 percent in the first half by default). The chance of every number of further goals is then added to the
+current score, which gives home, draw and away probabilities for the final result. At minute 0 and 0:0 it
+reproduces the sealed forecast exactly. Nothing is trained on the match itself.
+
+**What it uses.** The score, an estimate of the match minute, and the sealed forecast. OpenLigaDB lists each
+goal with its minute and the running score, but it has no clock, no cards, no substitutions and no
+injuries. The minute is estimated from the kickoff time (45 minutes, a 15 minute break, 45 minutes), so it can
+be a few minutes off, and goals can appear a minute or more late. Red cards are not used, and the dashboard says so.
+
+**Game state.** Teams that trail may attack more and teams that lead may defend. `StateFactors` multiplies a
+team's scoring rate by a factor for trailing by 1, trailing by 2 or more, leading by 1 and leading by 2 or
+more. The default is 1 everywhere. `spieltag-inplay-fit` estimates the factors by counting goals in 5-minute
+slices on past seasons, shrinks the ones that rest on few goals towards 1, and tests them on the latest
+seasons it did not fit. With `--write` it stores them only if they clearly beat the neutral model on those
+held-out seasons. Until then the live job runs neutral.
+
+```bash
+spieltag-evaluate --bucket my-lake                     # writes the walk-forward predictions it needs
+spieltag-inplay-fit --bucket my-lake                   # report only
+spieltag-inplay-fit --bucket my-lake --write           # store the parameters if they win held-out
+```
+
+**Scoring the live line.** For every finished match the stored estimates at minutes 15, 30, 45, 60 and 75
+are scored (ranked probability score and Brier score) against the sealed forecast and published as a table
+with a 95 percent interval. A live line that uses the score must beat the sealed one by more the later the
+minute. If it does not, something is wrong.
+
+**Running it.** `aws_scheduler_schedule.inplay` invokes the same Lambda every five minutes with
+`{"task": "inplay"}`. A tick returns at once unless a sealed match has kicked off in the last four and a half
+hours. It reads the sealed records and never writes them. Set `inplay_enabled = false` in `infra/main` to switch
+the schedule off without touching anything else. The alarm `spieltag-inplay-feed-failing` fires if the match
+feed fails for 15 minutes while a match is on.
+
+What has been checked: the tick logic, the maths and the estimator on simulated matches (the planted
+state effect is recovered and the probabilities are calibrated), and the page in a browser. What has not been
+checked: the model on real Bundesliga goal times. Run `spieltag-inplay-fit` for that, and read its held-out table.
+
 ## Evaluate the models
 
 ```bash
@@ -208,8 +253,8 @@ Pull requests that touch `infra/` get a read-only `terraform plan` in their job 
 The first deploy ends with the dashboard URL in the job summary. AWS also emails a subscription
 confirmation to `ALERT_EMAIL`. Click it, or the alarms cannot reach you.
 
-The dashboard needs no database or server. It is static files plus four JSON files under `site/data/`
-that the pipeline rewrites every hour.
+The dashboard needs no database or server. It is static files plus five JSON files under `site/data/`.
+Four are rewritten every hour, and `inplay.json` every five minutes while a match is on.
 
 ## Operating it
 
@@ -219,6 +264,7 @@ that the pipeline rewrites every hour.
 | `spieltag-no-recent-run` | No completed run for three hours. | Check that the schedule is enabled and the function is not failing. Check the account's billing status. |
 | `spieltag-missed-forecast` | A match kicked off without a frozen forecast. | It cannot be fixed afterwards, by design. Find the cause (usually an earlier outage). The alarm clears after three days. `status.json` keeps the lifetime count in `missed_total`. |
 | `spieltag-ingest-failing` | Fetching or validating match data failed for six hours. | Forecasts continue from stored data. Look for `ingest_failed` in the logs. If OpenLigaDB changed its format, fix `ingest.py` and its test fixture together. |
+| `spieltag-inplay-feed-failing` | The live match feed failed for 15 minutes during a match. | Only the live line is stale; sealed forecasts are unaffected. Look for `inplay_feed_failed` in the logs. |
 | `spieltag-problem-records` | A frozen forecast failed its fingerprint check, or the data has a gap. | Read `problems` in `status.json`. Treat a fingerprint failure as a serious event. |
 
 The dashboard shows the same health state at the top. It turns amber when something needs attention
@@ -248,6 +294,8 @@ limit by name:
 
 ## What v1 does not do
 
+- **The live line knows only the score and the clock.** No cards, substitutions, injuries, possession or
+  shots. A paid event feed would be needed, and its history, to learn what they are worth.
 - **No bookmaker benchmark.** Without odds, nothing here says how the models compare with the market.
 - **Few live matches at first.** The live record starts on the day of the first deploy. Until 30
   matches are graded, the dashboard says it is too early to call.
@@ -261,13 +309,14 @@ limit by name:
 ```
 infra/bootstrap/   state bucket, GitHub OIDC roles, budget alert
 infra/main/        main.tf   ECR, data lake bucket and its policy
-                   app.tf    Lambda function, its role, the hourly schedule
+                   app.tf    Lambda function, its role, the hourly and five-minute schedules
                    site.tf   CloudFront with origin access control and security headers
-                   alarms.tf SNS topic and the five alarms
+                   alarms.tf SNS topic and the six alarms
 src/spieltag/      ingest.py, contracts.py, store.py, pipeline.py        ingest
                    ratings.py, features.py, models.py, metrics.py        modelling
                    evaluate.py, evaluate_cli.py                          backtest
                    frozen.py, live.py, cycle.py, handler.py, run_cli.py  production
+                   inplay.py, inplay_fit.py, inplay_fit_cli.py           live line
 site/              the dashboard: index.html, style.css, app.js, one self-hosted font
 tests/             pytest tests, a simulated league and a simulated clock for replays
 .github/workflows/ ci.yml, deploy.yml, plan.yml

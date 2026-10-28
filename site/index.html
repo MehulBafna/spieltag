@@ -32,6 +32,15 @@
   </header>
 
   <main class="wrap">
+    <section id="live" aria-labelledby="live-h">
+      <div class="section-head">
+        <h2 id="live-h">Live now</h2>
+        <p class="note">An estimate from the score and the clock, shown under the sealed forecast. It never replaces it.</p>
+      </div>
+      <div id="live-cards" aria-live="polite"></div>
+      <div id="live-stats"></div>
+    </section>
+
     <section id="next" aria-labelledby="next-h">
       <div class="section-head">
         <h2 id="next-h">Next fixtures</h2>
@@ -92,6 +101,7 @@
         <div><dt>Sealed once</dt><dd>Each forecast is a separate file written with a conditional write. A second write for the same match is refused by the storage service itself, and every file carries a fingerprint that exposes edits.</dd></div>
         <div><dt>Only what was known</dt><dd>Models learn from results that were final when the forecast was sealed, and ratings and form are rebuilt as of that moment. A result counts as known three hours after kickoff.</dd></div>
         <div><dt>Same code as the backtest</dt><dd>A replay test runs a simulated season hour by hour and checks that the live pipeline's forecasts equal the backtest's, to the last digit.</dd></div>
+        <div><dt>The live line is separate</dt><dd>While a match is played, a second estimate updates every five minutes from the score and the clock. It is stored apart from the sealed forecast, never replaces it, and is scored on its own at minutes 15, 30, 45, 60 and 75. It knows nothing about cards, substitutions or injuries.</dd></div>
         <div><dt>Misses are counted</dt><dd>If a run is missed, the match is reported as missed and an alarm fires. A forecast is never written after kickoff, and never backfilled.</dd></div>
       </dl>
     </section>

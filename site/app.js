@@ -668,6 +668,240 @@
     });
   }
 
+  /* ---------- live now: the sealed forecast against the live estimate ---------- */
+
+  const SIDES = ["home", "draw", "away"];
+  const SIDE_COLOR = { home: "var(--home)", draw: "var(--draw)", away: "var(--away)" };
+  const SIDE_TEXT = { home: "Home", draw: "Draw", away: "Away" };
+
+  function minuteText(p) {
+    if (!p) return "";
+    if (p.phase === "full_time") return "Full time";
+    if (p.phase === "half_time") return "Half time";
+    return p.minute >= 90 ? "90+" : `${p.minute}′`;
+  }
+
+  const probs = (source, prefix = "p_") => SIDES.map((s) => source[`${prefix}${s}`]);
+
+  function compareRow(label, p, happened) {
+    const [bar, line] = probabilityBar({ p_home: p[0], p_draw: p[1], p_away: p[2] }, happened);
+    return el("div", { class: "cmp-row" },
+      el("span", { class: "cmp-label", text: label }),
+      el("div", { class: "cmp-bar" }, bar, line));
+  }
+
+  /* Change in whole percentage points, computed from the numbers that are shown. */
+  function deltaRow(sealed, live) {
+    const a = percents(sealed);
+    const b = percents(live);
+    const row = el("div", { class: "cmp-row" }, el("span", { class: "cmp-label", text: "Change" }));
+    const chips = el("div", { class: "deltas" });
+    SIDES.forEach((side, i) => {
+      const d = b[i] - a[i];
+      const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "–";
+      const chip = el("span", { class: `delta ${d > 0 ? "up" : d < 0 ? "down" : "flat"}` },
+        el("i", { class: `swatch ${side}` }),
+        document.createTextNode(`${SIDE_TEXT[side]} ${arrow} ${Math.abs(d)} pp`));
+      chips.append(chip);
+    });
+    row.append(chips);
+    return row;
+  }
+
+  function drawLiveChart(node, t, width) {
+    clear(node);
+    const sealed = probs(t.sealed);
+    const pts = [{ minute: 0, p: sealed, home: 0, away: 0, phase: "start" }].concat(
+      t.points.map((q) => ({ minute: Math.min(q.minute, 90), p: probs(q), home: q.home, away: q.away, phase: q.phase })));
+    const height = Math.round(Math.min(260, Math.max(190, width * 0.42)));
+    const m = { l: 40, r: 78, t: 10, b: 34 };
+    const plotW = width - m.l - m.r;
+    const plotH = height - m.t - m.b;
+    const sx = (minute) => m.l + (minute / 90) * plotW;
+    const sy = (v) => m.t + (1 - v) * plotH;
+    const root = svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img",
+      "aria-label": `${t.home_team} against ${t.away_team}: win probability by minute, live line against the sealed forecast` });
+
+    for (const v of [0, 0.25, 0.5, 0.75, 1]) {
+      root.append(svg("line", { class: "grid", x1: m.l, x2: m.l + plotW, y1: sy(v), y2: sy(v) }));
+      root.append(svg("text", { class: "tick-label", x: m.l - 8, y: sy(v) + 4, "text-anchor": "end", text: `${Math.round(v * 100)}%` }));
+    }
+    for (const minute of [0, 15, 30, 45, 60, 75, 90]) {
+      root.append(svg("text", { class: "tick-label", x: sx(minute), y: m.t + plotH + 18, "text-anchor": "middle", text: String(minute) }));
+    }
+    root.append(svg("line", { class: "zero", x1: sx(45), x2: sx(45), y1: m.t, y2: m.t + plotH, "stroke-dasharray": "2 4" }));
+
+    SIDES.forEach((side, i) => {
+      root.append(svg("line", { class: "sealed-line", x1: sx(0), x2: sx(90), y1: sy(sealed[i]), y2: sy(sealed[i]), stroke: SIDE_COLOR[side] }));
+    });
+    SIDES.forEach((side, i) => {
+      const d = pts.map((q, k) => `${k ? "L" : "M"}${sx(q.minute).toFixed(1)} ${sy(q.p[i]).toFixed(1)}`).join("");
+      root.append(svg("path", { d, fill: "none", stroke: SIDE_COLOR[side], "stroke-width": 2.5, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    });
+
+    pts.forEach((q, k) => {
+      if (k > 0 && (q.home !== pts[k - 1].home || q.away !== pts[k - 1].away)) {
+        root.append(svg("line", { class: "goal-tick", x1: sx(q.minute), x2: sx(q.minute), y1: m.t, y2: m.t + plotH }));
+        root.append(svg("text", { class: "goal-label halo", x: sx(q.minute) + 4, y: m.t + 12, text: `${q.home}:${q.away}` }));
+      }
+    });
+
+    const last = pts[pts.length - 1];
+    const ends = SIDES.map((side, i) => ({ side, i, y: sy(last.p[i]) })).sort((a, b) => a.y - b.y);
+    for (let k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 14) ends[k].y = ends[k - 1].y + 14;
+    const overflow = ends[ends.length - 1].y - (m.t + plotH);
+    if (overflow > 0) for (const e of ends) e.y -= overflow;
+    const pc = percents(last.p);
+    for (const e of ends) {
+      root.append(svg("circle", { class: "ring", cx: sx(last.minute), cy: sy(last.p[e.i]), r: 4.5, fill: SIDE_COLOR[e.side] }));
+      root.append(svg("text", { class: "value-label", x: m.l + plotW + 10, y: e.y + 4, text: `${SIDE_TEXT[e.side]} ${pc[e.i]}%` }));
+    }
+
+    const cross = svg("line", { class: "crosshair", y1: m.t, y2: m.t + plotH, x1: 0, x2: 0, visibility: "hidden" });
+    const overlay = svg("rect", { class: "hit", x: m.l, y: m.t, width: plotW, height: plotH, tabindex: 0, role: "group",
+      "aria-label": "Probabilities over the match. Use the left and right arrow keys to move between estimates." });
+    root.append(cross, overlay);
+    let index = pts.length - 1;
+    const show = (k, pointer) => {
+      index = k;
+      const q = pts[k];
+      cross.setAttribute("x1", sx(q.minute));
+      cross.setAttribute("x2", sx(q.minute));
+      cross.setAttribute("visibility", "visible");
+      showTip((box) => {
+        tipTitle(box, `${q.phase === "start" ? "Kickoff" : minuteText(q)} · ${q.home}:${q.away}`);
+        const now = percents(q.p);
+        const was = percents(sealed);
+        SIDES.forEach((side, i) => tipRow(box, `${SIDE_TEXT[side]} (sealed ${was[i]}%)`, `${now[i]}%`, SIDE_COLOR[side]));
+      }, pointer, overlay);
+    };
+    const nearest = (event) => {
+      const box = root.getBoundingClientRect();
+      const px = ((event.clientX - box.left) / box.width) * width;
+      let best = 0;
+      pts.forEach((q, k) => { if (Math.abs(sx(q.minute) - px) < Math.abs(sx(pts[best].minute) - px)) best = k; });
+      return best;
+    };
+    overlay.addEventListener("pointermove", (event) => show(nearest(event), event));
+    overlay.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+    overlay.addEventListener("focus", () => show(index, null));
+    overlay.addEventListener("blur", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft") { event.preventDefault(); show(Math.max(0, index - 1), null); }
+      if (event.key === "ArrowRight") { event.preventDefault(); show(Math.min(pts.length - 1, index + 1), null); }
+    });
+    node.append(root);
+  }
+
+  function liveTable(t) {
+    const rows = t.points.map((q) => {
+      const r = percents(probs(q));
+      return el("tr", {}, el("th", { text: minuteText(q), scope: "row" }), el("td", { text: `${q.home}:${q.away}` }),
+        el("td", { text: `${r[0]}%` }), el("td", { text: `${r[1]}%` }), el("td", { text: `${r[2]}%` }));
+    });
+    return el("div", { class: "table-scroll" }, el("table", {},
+      el("thead", {}, el("tr", {}, ...["Minute", "Score", "Home", "Draw", "Away"].map((h) => el("th", { text: h, scope: "col" })))),
+      el("tbody", {}, ...rows)));
+  }
+
+  function liveCard(t) {
+    const last = t.points[t.points.length - 1];
+    const finished = Boolean(t.final);
+    const sealed = probs(t.sealed, "p_");
+    const title = `${t.home_team} ${last.home}:${last.away} ${t.away_team}`;
+    const card = el("article", { class: `live-card${finished ? " done" : ""}`, "aria-label": title });
+
+    const meta = el("div", { class: "live-meta" },
+      el("span", { class: `minute${finished ? "" : " running"}`, text: minuteText(last) }),
+      el("span", { text: finished ? `Matchday ${t.matchday}` : `Updated ${time(last.t)}` }));
+    card.append(el("div", { class: "live-head" },
+      el("div", { class: "live-teams" }, el("span", { text: t.home_team }),
+        el("b", { class: "live-score", text: `${last.home}:${last.away}` }), el("span", { text: t.away_team })),
+      meta));
+
+    const cmp = el("div", { class: "cmp" });
+    cmp.append(compareRow("Sealed before kickoff", sealed, finished ? SIDES[t.final.outcome] : null));
+    if (finished) {
+      const mid = [...t.points].reverse().find((q) => q.phase !== "full_time" && q.minute <= 75);
+      if (mid) {
+        cmp.append(compareRow(`Live estimate at ${mid.minute}′`, probs(mid), SIDES[t.final.outcome]));
+        cmp.append(deltaRow(sealed, probs(mid)));
+      }
+    } else {
+      cmp.append(compareRow("Live estimate", probs(last), null));
+      cmp.append(deltaRow(sealed, probs(last)));
+    }
+    card.append(cmp);
+
+    if (!finished && last.exp_final_home != null) {
+      card.append(el("p", { class: "live-facts", text:
+        `Expected final score ${last.exp_final_home.toFixed(1)} : ${last.exp_final_away.toFixed(1)}. Average of all the ways the rest of the match can go.` }));
+    }
+
+    const plot = el("div", { class: "plot" });
+    card.append(plot);
+    whenResized(plot, (w) => drawLiveChart(plot, t, w));
+    card.append(el("details", { class: "table-view" }, el("summary", { text: "Show as table" }), liveTable(t)));
+    return card;
+  }
+
+  function renderLiveStats(data) {
+    const box = $("live-stats");
+    clear(box);
+    const rows = ((data && data.checkpoints) || []).filter((r) => r.matches > 0);
+    if (!rows.length) {
+      box.append(el("p", { class: "note", text: "When live matches finish, a table here scores the live line against the sealed forecast at minutes 15, 30, 45, 60 and 75." }));
+      return;
+    }
+    const f3 = (v) => (v == null ? "–" : v.toFixed(3));
+    const head = ["Minute", "Matches", "Sealed error", "Live error", "Live improvement", "Live better in", "95% interval of the change"];
+    const body = rows.map((r) => el("tr", {},
+      el("th", { text: `${r.minute}′`, scope: "row" }), el("td", { text: int(r.matches) }),
+      el("td", { text: f3(r.rps_sealed) }), el("td", { text: f3(r.rps_live) }),
+      el("td", { text: r.gain == null ? "–" : signed(r.gain * 100) }),
+      el("td", { text: `${r.live_better} of ${r.matches}` }),
+      el("td", { text: r.diff_low == null ? "–" : `${r.diff_low.toFixed(3)} to ${r.diff_high.toFixed(3)}` })));
+    const fewest = Math.min(...rows.map((r) => r.matches));
+    box.append(el("figure", { class: "chart live-stats" },
+      el("figcaption", {},
+        el("strong", { text: "Does the live line beat the sealed line?" }),
+        el("span", { text: "Average forecast error at fixed minutes, over finished matches. Lower is better. A live line that uses the score should improve the later the minute." }),
+        fewest < 20 ? el("span", { text: `Only ${fewest} to ${Math.max(...rows.map((r) => r.matches))} matches so far, so these numbers move a lot.` }) : null),
+      el("div", { class: "table-scroll" }, el("table", {},
+        el("thead", {}, el("tr", {}, ...head.map((h) => el("th", { text: h, scope: "col" })))),
+        el("tbody", {}, ...body)))));
+  }
+
+  function renderLive(data) {
+    const box = $("live-cards");
+    clear(box);
+    const matches = (data && data.matches) || [];
+    if (!matches.length) {
+      box.append(el("p", { class: "empty", text: data
+        ? "No match is being played right now. Live estimates appear here during matches whose forecast was sealed."
+        : "Live estimates are not switched on, or have not started yet." }));
+    } else {
+      const ordered = [...matches].sort((a, b) =>
+        (Boolean(a.final) - Boolean(b.final)) || (b.kickoff_utc.localeCompare(a.kickoff_utc)));
+      for (const t of ordered) box.append(liveCard(t));
+    }
+    renderLiveStats(data);
+    return matches.some((t) => !t.final);
+  }
+
+  let liveStamp = null;
+  let liveRunning = false;
+
+  async function pollLive() {
+    const data = await load("inplay.json");
+    const stamp = data ? data.generated_at : "none";
+    if (stamp !== liveStamp) {
+      liveStamp = stamp;
+      liveRunning = renderLive(data);
+    }
+    setTimeout(pollLive, liveRunning ? 30000 : 120000);
+  }
+
   /* ---------- start ---------- */
 
   async function start() {
@@ -682,6 +916,7 @@
     renderTrend(live);
     renderRecent(live);
     setInterval(() => renderHealth(status), 60000);
+    pollLive();
   }
 
   start();
